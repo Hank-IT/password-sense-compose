@@ -1,0 +1,150 @@
+name: password-sense
+services:
+  fpm:
+     image: docker.hank-it.com/password-sense/fpm:${DOCKER_PS_API_TAG:?err}
+     restart: always
+     env_file: .env
+     depends_on:
+       - database
+       - websockets
+       - redis
+     volumes:
+       - app-storage:/var/www/html/storage
+     networks:
+       - default
+     labels:
+        - cosign.verify=keys/password-sense-2024-01.pub
+
+  web:
+      image: docker.hank-it.com/password-sense/web:${DOCKER_PS_API_TAG:?err}
+      restart: always
+      networks:
+        - frontend
+        - default
+      volumes:
+        - app-storage:/var/www/html/storage
+      depends_on:
+        - fpm
+        - database
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.password-sense-api-web.rule=Host(`${APP_DOMAIN:?err}`) && (PathPrefix(`/api`) || PathPrefix(`/sanctum`) || PathPrefix(`/oauth`))"
+        - "traefik.http.routers.password-sense-api.priority=100"
+        - "traefik.http.routers.password-sense-api-web.tls.certresolver=lets-encrypt"
+        - "traefik.http.routers.password-sense-api-web.tls=true"
+        - "traefik.http.services.password-sense-api-web.loadbalancer.server.port=8080"
+        - "traefik.docker.network=frontend"
+        - "cosign.verify=keys/password-sense-2024-01.pub"
+
+  frontend:
+    image: docker.hank-it.com/password-sense/frontend:${DOCKER_PS_FRONTEND_TAG:?err}
+    restart: always
+    networks:
+      - frontend
+    volumes:
+      - /opt/password-sense/config.json:/app/config.json
+    labels:
+      - "traefik.enable=true"
+
+        # 1) Exact OAuth authorize → frontend
+      - "traefik.http.routers.password-sense-frontend-oauth.rule=Host(`${APP_DOMAIN:?err}`) && Path(`/oauth/authorize`)"
+      - "traefik.http.routers.password-sense-frontend-oauth.priority=200"
+      - "traefik.http.routers.password-sense-frontend-oauth.tls=true"
+      - "traefik.http.routers.password-sense-frontend-oauth.tls.certresolver=lets-encrypt"
+
+        # 2) SPA catch-all → frontend
+      - "traefik.http.routers.password-sense-frontend.rule=Host(`${APP_DOMAIN:?err}`)"
+      - "traefik.http.routers.password-sense-frontend.priority=1"
+      - "traefik.http.routers.password-sense-frontend.tls=true"
+      - "traefik.http.routers.password-sense-frontend.tls.certresolver=lets-encrypt"
+
+        # Shared service definition
+      - "traefik.http.services.password-sense-frontend.loadbalancer.server.port=3000"
+      - "traefik.http.services.password-sense-frontend.loadbalancer.server.scheme=http"
+      - "cosign.verify=keys/password-sense-2024-01.pub"
+
+  scheduler:
+      image: docker.hank-it.com/password-sense/fpm:${DOCKER_PS_API_TAG:?err}
+      restart: always
+      env_file: .env
+      entrypoint: docker-ps-scheduler-entrypoint
+      volumes:
+        - app-storage:/var/www/html/storage
+      depends_on:
+        - database
+        - redis
+      networks:
+        - default
+
+  queue-default:
+      image: docker.hank-it.com/password-sense/fpm:${DOCKER_PS_API_TAG:?err}
+      restart: always
+      deploy:
+        mode: replicated
+        replicas: ${DOCKER_PS_QUEUE_DEFAULT_REPLICAS:-6}
+      env_file: .env
+      entrypoint: docker-ps-queue-entrypoint
+      volumes:
+        - app-storage:/var/www/html/storage
+      depends_on:
+        - database
+        - redis
+      networks:
+        - default
+
+  database:
+      image: mariadb:10.11
+      restart: always
+      networks:
+        - default
+      healthcheck:
+        test: ["CMD", "mysqladmin", "--user=${DB_USERNAME:?err}", "--password=${DB_PASSWORD:?err}", "--host=database", "--port=3306", "ping", "--silent"]
+        interval: 5s
+        timeout: 60s
+        retries: 20
+        start_period: 5s
+      environment:
+        MARIADB_RANDOM_ROOT_PASSWORD: 'yes'
+        MYSQL_DATABASE: ${DB_DATABASE:?err}
+        MYSQL_USER: ${DB_USERNAME:?err}
+        MYSQL_PASSWORD: ${DB_PASSWORD:?err}
+        MARIADB_AUTO_UPGRADE: 1
+      volumes:
+        - database-storage:/var/lib/mysql
+
+  redis:
+    image: redis:8.6
+    restart: always
+    networks:
+      - default
+    healthcheck:
+      test: [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+
+  websockets:
+    image: quay.io/soketi/soketi:1.0-16-distroless
+    restart: always
+    environment:
+      DEBUG: '0'
+      SOKETI_DEFAULT_APP_ID: ${WEBSOCKET_APP_ID}
+      SOKETI_DEFAULT_APP_KEY: ${WEBSOCKET_APP_KEY}
+      SOKETI_DEFAULT_APP_SECRET: ${WEBSOCKET_APP_SECRET}
+    networks:
+      - frontend
+      - default
+    labels:
+      - "traefik.http.routers.password-sense-api-ws.rule=Host(`${APP_DOMAIN:?err}`) && PathPrefix(`/ws`)"
+      - "traefik.http.routers.password-sense-api-ws.entrypoints=websecure"
+      - "traefik.http.routers.password-sense-api-ws.tls=true"
+      - "traefik.http.services.password-sense-api-ws.loadbalancer.server.port=6001"
+      - "traefik.http.services.password-sense-api-ws.loadbalancer.server.scheme=http"
+      - "traefik.http.routers.password-sense-api-ws.middlewares=password-sense-api-ws-stripprefix"
+      - "traefik.http.middlewares.password-sense-api-ws-stripprefix.stripprefix.prefixes=/ws"
+
+volumes:
+  database-storage:
+  app-storage:
+
+networks:
+  default:
+  frontend:
+    external: true

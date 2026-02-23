@@ -1,0 +1,9 @@
+{
+  "environment": "production",
+  "api": [
+    {
+      "server": "",
+      "websocketKey": ""
+    }
+  ]
+}
